@@ -1,13 +1,11 @@
-# .github/workflows/ai-code-review.yml
+# .github/workflows/ai-code-review.yml (v2 - with fixes)
 
 name: AI Code Review with Gemini
 
-# 觸發條件：當有 pull request 開啟或更新時觸發
 on:
   pull_request:
     types: [opened, synchronize]
 
-# 設定權限，允許 workflow 對 pull requests 寫入留言
 permissions:
   contents: read
   pull-requests: write
@@ -17,29 +15,23 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 步驟 1: 取得儲存庫的程式碼
-      # fetch-depth: 0 會取得所有歷史紀錄，以便我們能比較分支間的差異
+      # 步驟 1: 新增 - 安裝 jq 工具
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      # 步驟 2: 取得儲存庫的程式碼
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # 步驟 2: 抓取 Pull Request 的程式碼差異 (diff)
-      # 我們比較 PR 的來源分支 (HEAD) 與目標分支 (BASE)
+      # 步驟 3: 抓取 Pull Request 的程式碼差異 (diff)
       - name: Get PR Diff
         id: get_diff
         run: |
-          # 從 GitHub 事件的 payload 中取得 base 和 head 的 commit SHA
-          BASE_SHA=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" ${{ github.event.pull_request.url }} | jq -r '.base.sha')
-          HEAD_SHA=${{ github.event.pull_request.head.sha }}
+          # 使用 GitHub context 變數，這是最穩定的方式
+          git diff --no-color "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}" > diff.txt
           
-          echo "Base SHA: $BASE_SHA"
-          echo "Head SHA: $HEAD_SHA"
-
-          # 使用 git diff 產生差異，並將結果儲存到一個暫存檔中
-          git diff --no-color "${BASE_SHA}" "${HEAD_SHA}" > diff.txt
-          
-          # 檢查 diff.txt 是否為空，如果為空則終止後續步驟
           if [ ! -s diff.txt ]; then
             echo "No code changes detected. Skipping AI review."
             echo "continue=false" >> $GITHUB_OUTPUT
@@ -48,17 +40,14 @@ jobs:
             echo "continue=true" >> $GITHUB_OUTPUT
           fi
 
-
-      # 步驟 3: 呼叫 Gemini API 進行程式碼審查 (僅當有程式碼差異時執行)
+      # 步驟 4: 呼叫 Gemini API 進行程式碼審查
       - name: Call Gemini API for Code Review
         id: call_gemini
         if: steps.get_diff.outputs.continue == 'true'
         run: |
-          # 讀取 diff 檔案內容
           CODE_DIFF=$(cat diff.txt)
 
-          # 使用 jq 工具安全地建立 JSON payload，避免特殊字元問題
-          # 這裡我們將您的設定和問題整合進去
+          # 安全地建立 JSON payload
           JSON_PAYLOAD=$(jq -n --arg diff "$CODE_DIFF" '{
             "contents": [{
               "parts": [{
@@ -80,23 +69,34 @@ jobs:
             ]
           }')
 
-          # 呼叫 Gemini API
           API_KEY="${{ secrets.GEMINI_API_KEY }}"
-          RESPONSE=$(curl -s -X POST "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${API_KEY}" \
+          RESPONSE=$(curl -s -X POST "https://generativela..googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${API_KEY}" \
                -H "Content-Type: application/json" \
                -d "${JSON_PAYLOAD}"
           )
-          
+
+          # **新增的錯誤處理**：檢查 API 回應是否包含 "error" 欄位
+          if echo "${RESPONSE}" | jq -e '.error' > /dev/null; then
+            echo "::error::Gemini API returned an error:"
+            echo "${RESPONSE}"
+            exit 1
+          fi
+
+          # 檢查 'candidates' 是否存在，如果不存在也視為錯誤
+          if ! echo "${RESPONSE}" | jq -e '.candidates' > /dev/null; then
+            echo "::error::Gemini API response is not in the expected format. 'candidates' field is missing."
+            echo "Full response: ${RESPONSE}"
+            exit 1
+          fi
+
           # 從回應中解析出審查建議
           REVIEW_COMMENT=$(echo "${RESPONSE}" | jq -r '.candidates[0].content.parts[0].text')
           
-          # 將審查建議存為後續步驟可以使用的格式
-          # 我們使用一個特殊的 EOF 標記來處理多行文字
           echo "review_comment<<EOF" >> $GITHUB_OUTPUT
           echo "${REVIEW_COMMENT}" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      # 步驟 4: 將 Gemini 的審查建議留言到 Pull Request 上
+      # 步驟 5: 將 Gemini 的審查建議留言到 Pull Request 上
       - name: Post Review Comment to PR
         if: steps.get_diff.outputs.continue == 'true'
         uses: actions/github-script@v7
