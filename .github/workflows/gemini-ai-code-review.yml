@@ -1,4 +1,4 @@
-# .github/workflows/ai-code-review.yml (v3 - Fix jq syntax error)
+# .github/workflows/ai-code-review.yml (v4 - Fix script injection issue)
 
 name: AI Code Review with Gemini
 
@@ -45,63 +45,36 @@ jobs:
         if: steps.get_diff.outputs.continue == 'true'
         run: |
           CODE_DIFF=$(cat diff.txt)
-
-          # **修正 jq 語法**：使用 string interpolation "\($diff)" 而不是 "+" 號
           JSON_PAYLOAD=$(jq -n --arg diff "$CODE_DIFF" '{
             "contents": [{
               "parts": [{
                 "text": "你是一位資深的程式碼審查員 (Senior Code reviewer)，專長在於找出技術債、重構建議與 clean code 和 SOLID 原則。\n\n以下是 pull request 的程式碼差異 (diff)，請根據你的專業，審查這段程式碼。請明確指出是否有潛在的技術債、程式碼壞味道 (code smell)、未來的維護風險或潛在的安全性問題。最後，請以條列式的方式提供具體的重構建議。\n\n---程式碼差異開始---\n\n\($diff)\n\n---程式碼差異結束---"
               }]
             }],
-            "generationConfig": {
-              "temperature": 0.4,
-              "topK": 32,
-              "topP": 1,
-              "maxOutputTokens": 4096,
-              "stopSequences": []
-            },
+            "generationConfig": { "temperature": 0.4, "topK": 32, "topP": 1, "maxOutputTokens": 4096, "stopSequences": [] },
             "safetySettings": [
-              { "category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE" },
-              { "category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE" },
-              { "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE" },
-              { "category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE" }
+              { "category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE" }, { "category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE" },
+              { "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE" }, { "category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE" }
             ]
           }')
-
           API_KEY="${{ secrets.GEMINI_API_KEY }}"
-          RESPONSE=$(curl -s -X POST "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${API_KEY}" \
-               -H "Content-Type: application/json" \
-               -d "${JSON_PAYLOAD}"
-          )
-
-          # 錯誤處理
-          if echo "${RESPONSE}" | jq -e '.error' > /dev/null; then
-            echo "::error::Gemini API returned an error:"
-            echo "${RESPONSE}"
-            exit 1
-          fi
-          if ! echo "${RESPONSE}" | jq -e '.candidates' > /dev/null; then
-            echo "::error::Gemini API response is not in the expected format. 'candidates' field is missing."
-            echo "Full response: ${RESPONSE}"
-            exit 1
-          fi
-          
+          RESPONSE=$(curl -s -X POST "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${API_KEY}" -H "Content-Type: application/json" -d "${JSON_PAYLOAD}")
+          if echo "${RESPONSE}" | jq -e '.error' > /dev/null; then echo "::error::Gemini API returned an error:" && echo "${RESPONSE}" && exit 1; fi
+          if ! echo "${RESPONSE}" | jq -e '.candidates' > /dev/null; then echo "::error::Gemini API response is not in the expected format. 'candidates' field is missing." && echo "Full response: ${RESPONSE}" && exit 1; fi
           REVIEW_COMMENT=$(echo "${RESPONSE}" | jq -r '.candidates[0].content.parts[0].text')
-          
           echo "review_comment<<EOF" >> $GITHUB_OUTPUT
           echo "${REVIEW_COMMENT}" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      # 步驟 5: 將 Gemini 的審查建議留言到 Pull Request 上
+      # 步驟 5: 將 Gemini 的審查建議留言到 Pull Request 上 (修正版)
       - name: Post Review Comment to PR
         if: steps.get_diff.outputs.continue == 'true'
         uses: actions/github-script@v7
+        # **新增 env 區塊**：將 review comment 作為環境變數傳入
+        env:
+          REVIEW_COMMENT: ${{ steps.call_gemini.outputs.review_comment }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          # **修改 script 區塊**：從 process.env 讀取變數
           script: |
-            const reviewComment = `${{ steps.call_gemini.outputs.review_comment }}`;
-            const issue_number = context.issue.number;
-            const repo = context.repo;
-
-            const comment = `
-            ###
+            const reviewComment = process.env.
