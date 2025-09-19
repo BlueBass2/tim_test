@@ -77,7 +77,8 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           # Read the variable from process.env inside the script
           script: |
-            const reviewComment = process.env.REVIEW_COMMENT;
+            const rawComment = process.env.REVIEW_COMMENT;
+            const escapedComment = rawComment.replace(/`/g, '\\`');
             const issue_number = context.issue.number;
 
             const comment = `
