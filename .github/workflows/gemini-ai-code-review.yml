@@ -70,34 +70,34 @@ jobs:
       - name: Post Review Comment to PR
         if: steps.get_diff.outputs.continue == 'true'
         uses: actions/github-script@v7
-        # Pass the review comment as an environment variable
         env:
           REVIEW_COMMENT: ${{ steps.call_gemini.outputs.review_comment }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          # Read the variable from process.env inside the script
           script: |
             const rawComment = process.env.REVIEW_COMMENT;
+            // 在插入到樣板字面值之前，對所有反引號進行跳脫
             const escapedComment = rawComment.replace(/`/g, '\\`');
+            
             const issue_number = context.issue.number;
-
-            const comment = `
+  
+            const finalBody = `
             ### 🤖 Gemini AI Code Review
-
+  
             Hello! I've reviewed the changes in this pull request. Here are my findings:
-
+  
             ---
-
-            ${reviewComment}
-
+  
+            ${escapedComment}
+  
             ---
-
+  
             *Note: This is an automated review by Gemini. Please use it as a guide and apply human oversight.*
             `;
-
+  
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: issue_number,
-              body: comment
+              body: finalBody
             });
