@@ -1,0 +1,128 @@
+# .github/workflows/ai-code-review.yml
+
+name: AI Code Review with Gemini
+
+# 觸發條件：當有 pull request 開啟或更新時觸發
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+# 設定權限，允許 workflow 對 pull requests 寫入留言
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  code-review:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 步驟 1: 取得儲存庫的程式碼
+      # fetch-depth: 0 會取得所有歷史紀錄，以便我們能比較分支間的差異
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 步驟 2: 抓取 Pull Request 的程式碼差異 (diff)
+      # 我們比較 PR 的來源分支 (HEAD) 與目標分支 (BASE)
+      - name: Get PR Diff
+        id: get_diff
+        run: |
+          # 從 GitHub 事件的 payload 中取得 base 和 head 的 commit SHA
+          BASE_SHA=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" ${{ github.event.pull_request.url }} | jq -r '.base.sha')
+          HEAD_SHA=${{ github.event.pull_request.head.sha }}
+          
+          echo "Base SHA: $BASE_SHA"
+          echo "Head SHA: $HEAD_SHA"
+
+          # 使用 git diff 產生差異，並將結果儲存到一個暫存檔中
+          git diff --no-color "${BASE_SHA}" "${HEAD_SHA}" > diff.txt
+          
+          # 檢查 diff.txt 是否為空，如果為空則終止後續步驟
+          if [ ! -s diff.txt ]; then
+            echo "No code changes detected. Skipping AI review."
+            echo "continue=false" >> $GITHUB_OUTPUT
+          else
+            echo "Code changes detected. Proceeding with AI review."
+            echo "continue=true" >> $GITHUB_OUTPUT
+          fi
+
+
+      # 步驟 3: 呼叫 Gemini API 進行程式碼審查 (僅當有程式碼差異時執行)
+      - name: Call Gemini API for Code Review
+        id: call_gemini
+        if: steps.get_diff.outputs.continue == 'true'
+        run: |
+          # 讀取 diff 檔案內容
+          CODE_DIFF=$(cat diff.txt)
+
+          # 使用 jq 工具安全地建立 JSON payload，避免特殊字元問題
+          # 這裡我們將您的設定和問題整合進去
+          JSON_PAYLOAD=$(jq -n --arg diff "$CODE_DIFF" '{
+            "contents": [{
+              "parts": [{
+                "text": "你是一位資深的程式碼審查員 (Senior Code reviewer)，專長在於找出技術債、重構建議與 clean code 和 SOLID 原則。\n\n以下是 pull request 的程式碼差異 (diff)，請根據你的專業，審查這段程式碼。請明確指出是否有潛在的技術債、程式碼壞味道 (code smell)、未來的維護風險或潛在的安全性問題。最後，請以條列式的方式提供具體的重構建議。\n\n---程式碼差異開始---\n\n" + $diff + "\n\n---程式碼差異結束---"
+              }]
+            }],
+            "generationConfig": {
+              "temperature": 0.4,
+              "topK": 32,
+              "topP": 1,
+              "maxOutputTokens": 4096,
+              "stopSequences": []
+            },
+            "safetySettings": [
+              { "category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE" },
+              { "category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE" },
+              { "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE" },
+              { "category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE" }
+            ]
+          }')
+
+          # 呼叫 Gemini API
+          API_KEY="${{ secrets.GEMINI_API_KEY }}"
+          RESPONSE=$(curl -s -X POST "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${API_KEY}" \
+               -H "Content-Type: application/json" \
+               -d "${JSON_PAYLOAD}"
+          )
+          
+          # 從回應中解析出審查建議
+          REVIEW_COMMENT=$(echo "${RESPONSE}" | jq -r '.candidates[0].content.parts[0].text')
+          
+          # 將審查建議存為後續步驟可以使用的格式
+          # 我們使用一個特殊的 EOF 標記來處理多行文字
+          echo "review_comment<<EOF" >> $GITHUB_OUTPUT
+          echo "${REVIEW_COMMENT}" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      # 步驟 4: 將 Gemini 的審查建議留言到 Pull Request 上
+      - name: Post Review Comment to PR
+        if: steps.get_diff.outputs.continue == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const reviewComment = `${{ steps.call_gemini.outputs.review_comment }}`;
+            const issue_number = context.issue.number;
+            const repo = context.repo;
+
+            const comment = `
+            ### 🤖 Gemini AI Code Review
+
+            Hello there! I've reviewed the changes in this pull request. Here are my findings and suggestions:
+
+            ---
+
+            ${reviewComment}
+
+            ---
+
+            *Please note: This is an automated review by Gemini. Human oversight is still recommended.*
+            `;
+
+            await github.rest.issues.createComment({
+              ...repo,
+              issue_number: issue_number,
+              body: comment
+            });
