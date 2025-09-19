@@ -15,17 +15,17 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 步驟 1: 安裝 jq 工具
+      # Step 1: Install jq tool
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
 
-      # 步驟 2: 取得儲存庫的程式碼
+      # Step 2: Checkout repository code
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # 步驟 3: 抓取 Pull Request 的程式碼差異 (diff)
+      # Step 3: Get the code difference from the Pull Request
       - name: Get PR Diff
         id: get_diff
         run: |
@@ -39,7 +39,7 @@ jobs:
             echo "continue=true" >> $GITHUB_OUTPUT
           fi
 
-      # 步驟 4: 呼叫 Gemini API 進行程式碼審查
+      # Step 4: Call the Gemini API for the code review
       - name: Call Gemini API for Code Review
         id: call_gemini
         if: steps.get_diff.outputs.continue == 'true'
@@ -48,7 +48,7 @@ jobs:
           JSON_PAYLOAD=$(jq -n --arg diff "$CODE_DIFF" '{
             "contents": [{
               "parts": [{
-                "text": "你是一位資深的程式碼審查員 (Senior Code reviewer)，專長在於找出技術債、重構建議與 clean code 和 SOLID 原則。\n\n以下是 pull request 的程式碼差異 (diff)，請根據你的專業，審查這段程式碼。請明確指出是否有潛在的技術債、程式碼壞味道 (code smell)、未來的維護風險或潛在的安全性問題。最後，請以條列式的方式提供具體的重構建議。\n\n---程式碼差異開始---\n\n\($diff)\n\n---程式碼差異結束---"
+                "text": "You are a senior code reviewer specializing in identifying technical debt, refactoring suggestions, and applying clean code and SOLID principles.\n\nPlease review the following code diff from a pull request. Identify any potential technical debt, code smells, maintenance risks, or security issues. Provide specific, actionable refactoring suggestions in a bulleted list.\n\n---START CODE DIFF---\n\n\($diff)\n\n---END CODE DIFF---"
               }]
             }],
             "generationConfig": { "temperature": 0.4, "topK": 32, "topP": 1, "maxOutputTokens": 4096, "stopSequences": [] },
@@ -66,15 +66,37 @@ jobs:
           echo "${REVIEW_COMMENT}" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      # 步驟 5: 將 Gemini 的審查建議留言到 Pull Request 上 (修正版)
+      # Step 5: Post the review comment to the Pull Request (Corrected)
       - name: Post Review Comment to PR
         if: steps.get_diff.outputs.continue == 'true'
         uses: actions/github-script@v7
-        # **新增 env 區塊**：將 review comment 作為環境變數傳入
+        # Pass the review comment as an environment variable
         env:
           REVIEW_COMMENT: ${{ steps.call_gemini.outputs.review_comment }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          # **修改 script 區塊**：從 process.env 讀取變數
+          # Read the variable from process.env inside the script
           script: |
-            const reviewComment = process.env.
+            const reviewComment = process.env.REVIEW_COMMENT;
+            const issue_number = context.issue.number;
+
+            const comment = `
+            ### 🤖 Gemini AI Code Review
+
+            Hello! I've reviewed the changes in this pull request. Here are my findings:
+
+            ---
+
+            ${reviewComment}
+
+            ---
+
+            *Note: This is an automated review by Gemini. Please use it as a guide and apply human oversight.*
+            `;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue_number,
+              body: comment
+            });
